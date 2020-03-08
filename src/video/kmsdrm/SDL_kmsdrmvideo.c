@@ -49,6 +49,9 @@
 
 #define KMSDRM_DRI_PATH "/dev/dri/"
 
+rga_info_t src_info = {0};
+rga_info_t dst_info = {0};
+
 static int
 check_modestting(int devindex)
 {
@@ -254,6 +257,41 @@ KMSDRM_FBDestroyCallback(struct gbm_bo *bo, void *data)
     SDL_free(fb_info);
 }
 
+static void
+KMSDRM_InitRotateBuffer(_THIS, int frameWidth, int frameHeight)
+{
+    SDL_VideoData *viddata = ((SDL_VideoData *)_this->driverdata);
+
+    // initialize 2D raster graphic acceleration unit (RGA)
+    c_RkRgaInit();
+
+    // create buffers for RGA
+    for (int i = 0; i < RGA_BUFFERS_MAX; ++i)
+    {
+        viddata->rga_buffers[i] = KMSDRM_gbm_bo_create(viddata->gbm,
+              frameWidth, (frameHeight + 32) & ~31,
+              GBM_FORMAT_XRGB8888, GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
+        assert(viddata->rga_buffers[i]);
+
+        viddata->rga_buffer_prime_fds[i] = KMSDRM_gbm_bo_get_fd(viddata->rga_buffers[i]);
+    }
+    viddata->rga_buffer_index = 0;
+
+    // setup rotation
+    src_info.fd = -1;
+    src_info.mmuFlag = 1;
+    src_info.rotation = HAL_TRANSFORM_ROT_270;
+
+    // swap width and height here because our source buffer (user side render buffer) is 480x320 or 854x480
+    rga_set_rect(&src_info.rect, 0, 0, frameHeight, frameWidth, (frameHeight + 32) & ~31, frameWidth, RK_FORMAT_BGRA_8888);
+
+    dst_info.fd = -1;
+    dst_info.mmuFlag = 1;
+
+    // this is our hardware side destination buffer which has 320x480 or 480x854 portrait type LCD size
+    rga_set_rect(&dst_info.rect, 0, 0, frameWidth, frameHeight, frameWidth, frameHeight, RK_FORMAT_BGRA_8888);
+}
+
 KMSDRM_FBInfo *
 KMSDRM_FBFromBO(_THIS, struct gbm_bo *bo)
 {
@@ -387,8 +425,8 @@ KMSDRM_CreateSurfaces(_THIS, SDL_Window * window)
     SDL_VideoData *viddata = ((SDL_VideoData *)_this->driverdata);
     SDL_WindowData *windata = (SDL_WindowData *)window->driverdata;
     SDL_DisplayData *dispdata = (SDL_DisplayData *) SDL_GetDisplayForWindow(window)->driverdata;
-    Uint32 width = dispdata->mode.hdisplay;
-    Uint32 height = dispdata->mode.vdisplay;
+    Uint32 width = dispdata->mode.vdisplay;
+    Uint32 height = dispdata->mode.hdisplay;
     Uint32 surface_fmt = GBM_FORMAT_XRGB8888;
     Uint32 surface_flags = GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING;
     EGLContext egl_context;
@@ -579,8 +617,8 @@ KMSDRM_VideoInit(_THIS)
 
     /* Setup the single display that's available */
 
-    display.desktop_mode.w = dispdata->mode.hdisplay;
-    display.desktop_mode.h = dispdata->mode.vdisplay;
+    display.desktop_mode.w = dispdata->mode.vdisplay;
+    display.desktop_mode.h = dispdata->mode.hdisplay;
     display.desktop_mode.refresh_rate = dispdata->mode.vrefresh;
 #if 1
     display.desktop_mode.format = SDL_PIXELFORMAT_ARGB8888;
@@ -697,8 +735,8 @@ KMSDRM_GetDisplayModes(_THIS, SDL_VideoDisplay * display)
           modedata->mode_index = i;
         }
 
-        mode.w = conn->modes[i].hdisplay;
-        mode.h = conn->modes[i].vdisplay;
+        mode.w = conn->modes[i].vdisplay;
+        mode.h = conn->modes[i].hdisplay;
         mode.refresh_rate = conn->modes[i].vrefresh;
         mode.format = SDL_PIXELFORMAT_ARGB8888;
         mode.driverdata = modedata;
@@ -750,6 +788,7 @@ KMSDRM_CreateWindow(_THIS, SDL_Window * window)
     SDL_VideoData *viddata = (SDL_VideoData *)_this->driverdata;
     SDL_WindowData *windata;
     SDL_VideoDisplay *display;
+    SDL_DisplayData *data;
 
 #if SDL_VIDEO_OPENGL_EGL
     if (!_this->egl_data) {
@@ -812,6 +851,9 @@ KMSDRM_CreateWindow(_THIS, SDL_Window * window)
     SDL_SetMouseFocus(window);
     SDL_SetKeyboardFocus(window);
 
+    data = display->driverdata;
+    KMSDRM_InitRotateBuffer(_this, data->mode.hdisplay, data->mode.vdisplay);
+
     return 0;
 
 error:
@@ -849,6 +891,13 @@ KMSDRM_DestroyWindow(_THIS, SDL_Window * window)
     window->driverdata = NULL;
 
     SDL_free(windata);
+    for (int i = 0; i < RGA_BUFFERS_MAX; ++i) {
+        close(viddata->rga_buffer_prime_fds[i]);
+    }
+    if (src_info.fd) {
+        close(src_info.fd);
+    }
+    c_RkRgaDeInit();
 }
 
 int
