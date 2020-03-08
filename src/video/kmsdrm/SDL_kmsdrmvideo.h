@@ -34,6 +34,10 @@
 #if SDL_VIDEO_OPENGL_EGL
 #include <EGL/egl.h>
 #endif
+#include <rga/RgaApi.h>
+#include <assert.h>
+
+#define RGA_BUFFERS_MAX (3)
 
 typedef struct SDL_VideoData
 {
@@ -44,6 +48,9 @@ typedef struct SDL_VideoData
     SDL_Window **windows;
     int max_windows;
     int num_windows;
+    struct gbm_bo* rga_buffers[RGA_BUFFERS_MAX];
+    int rga_buffer_prime_fds[RGA_BUFFERS_MAX];
+    int rga_buffer_index;
 } SDL_VideoData;
 
 
